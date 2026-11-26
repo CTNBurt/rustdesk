@@ -64,15 +64,46 @@ jobs:
             throw "Failed to replace constants. replacedServer=$replacedServer replacedKey=$replacedKey"
           }
 
-      - name: Install Windows dependencies via vcpkg
+      - name: Ensure opus is in vcpkg.json and install dependencies
         shell: pwsh
         run: |
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
           if ([string]::IsNullOrWhiteSpace($vcpkgRoot) -or -not (Test-Path "$vcpkgRoot\vcpkg.exe")) {
+            $vcpkgRoot = "C:\vcpkg"
+          }
+          if (-not (Test-Path "$vcpkgRoot\vcpkg.exe")) {
             throw "vcpkg.exe not found at $vcpkgRoot"
           }
+
+          if (Test-Path "vcpkg.json") {
+            $manifest = Get-Content "vcpkg.json" -Raw | ConvertFrom-Json
+            if ($null -eq $manifest.dependencies) {
+              $manifest | Add-Member -MemberType NoteProperty -Name "dependencies" -Value @()
+            }
+            $deps = @($manifest.dependencies)
+            $hasOpus = $false
+            foreach ($d in $deps) {
+              if (($d -is [string] -and $d -eq "opus") -or ($d.name -eq "opus")) {
+                $hasOpus = $true
+              }
+            }
+            if (-not $hasOpus) {
+              $deps += "opus"
+              $manifest.dependencies = $deps
+              $manifest | ConvertTo-Json -Depth 10 | Set-Content "vcpkg.json" -Encoding utf8
+              Write-Host "Added 'opus' to vcpkg.json"
+            }
+          }
+
+          $incDir = "$vcpkgRoot\installed\x64-windows-static\include"
+          $libDir = "$vcpkgRoot\installed\x64-windows-static\lib"
+
           "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "INCLUDE=$incDir;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "LIB=$libDir;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BINDGEN_EXTRA_CLANG_ARGS=-I`"$incDir`"" | Out-File -FilePath $env:GITHUB_ENV -Append
+
           & "$vcpkgRoot\vcpkg.exe" install --triplet x64-windows-static
 
       - name: Build Windows release binary
@@ -80,6 +111,9 @@ jobs:
         env:
           VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
+          INCLUDE: ${{ env.INCLUDE }}
+          LIB: ${{ env.LIB }}
+          BINDGEN_EXTRA_CLANG_ARGS: ${{ env.BINDGEN_EXTRA_CLANG_ARGS }}
         run: |
           cargo build --release --bin rustdesk
 
@@ -118,12 +152,12 @@ jobs:
               updated = raw
 
               updated, n1 = re.subn(
-                  r'(?s)(RENDEZVOUS_SERVERS\s*(?::[^=]+)?\s*=\s*&\[)[^\]]*(\]\s*;)',
+                  r'(?s)(RENDEZVOUS_SERVERS\s*(?::[^=]+)?=\s*&\[)[^\]]*(\]\s*;)',
                   rf'\g<1>"{server}"\g<2>',
                   updated,
               )
               updated, n2 = re.subn(
-                  r'(?s)(RS_PUB_KEY\s*(?::[^=]+)?\s*=\s*)"[^"]*"',
+                  r'(?s)(RS_PUB_KEY\s*(?::[^=]+)?=\s*)"[^"]*"',
                   rf'\g<1>"{pub_key}"',
                   updated,
               )
@@ -148,6 +182,17 @@ jobs:
           brew install nasm cmake ninja pkg-config
           git clone --depth 1 https://github.com/microsoft/vcpkg "$HOME/vcpkg"
           "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          python3 - <<'EOF'
+          import json, pathlib
+          p = pathlib.Path("vcpkg.json")
+          if p.exists():
+              data = json.loads(p.read_text(encoding="utf-8"))
+              deps = data.setdefault("dependencies", [])
+              if not any((d == "opus") or (isinstance(d, dict) and d.get("name") == "opus") for d in deps):
+                  deps.append("opus")
+                  p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                  print("Added 'opus' to vcpkg.json")
+          EOF
           "$HOME/vcpkg/vcpkg" install
           echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
 
