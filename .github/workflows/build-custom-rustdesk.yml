@@ -10,23 +10,27 @@ jobs:
       - uses: actions/checkout@v4
       - name: Inject server and key
         shell: pwsh
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
         run: |
-          $server = "${{ secrets.RENDEZVOUS_SERVER }}"
-          $pubKey = "${{ secrets.RS_PUB_KEY }}"
-          Get-ChildItem -Path src -Filter "*.rs" -Recurse | ForEach-Object {
-            $content = Get-Content $_.FullName -Raw
-            if ($content -match 'RENDEZVOUS_SERVERS') {
-              $content = $content -replace 'const RENDEZVOUS_SERVERS: &\[&str\] = &\[.*?\];', "const RENDEZVOUS_SERVERS: &[&str] = &[\"$server\"];"
-            }
-            if ($content -match 'RS_PUB_KEY') {
-              $content = $content -replace 'pub const RS_PUB_KEY: &str = ".*?";', "pub const RS_PUB_KEY: &str = \"$pubKey\";"
-            }
-            Set-Content -Path $_.FullName -Value $content -NoNewline
+          $server = $env:RENDEZVOUS_SERVER
+          $pubKey = $env:RS_PUB_KEY
+          if ([string]::IsNullOrWhiteSpace($server) -or [string]::IsNullOrWhiteSpace($pubKey)) {
+            throw "Missing RENDEZVOUS_SERVER or RS_PUB_KEY secret."
           }
+          $commonPath = "src/common.rs"
+          if (-not (Test-Path $commonPath)) {
+            throw "src/common.rs not found."
+          }
+          $txt = Get-Content $commonPath -Raw
+          $txt = [regex]::Replace($txt, '(?s)(RENDEZVOUS_SERVERS[^=]*=\s*&\[)[^\]]*(\]\s*;)', "`${1}`"$server`"`${2}")
+          $txt = [regex]::Replace($txt, '(?s)(RS_PUB_KEY[^=]*=\s*&?str\s*=\s*)"[^"]*"', "`${1}`"$pubKey`"")
+          Set-Content -Path $commonPath -Value $txt -NoNewline
       - name: Build Windows release binary
         shell: pwsh
         run: |
-          cargo build --release
+          cargo build --release --bin rustdesk
       - uses: actions/upload-artifact@v4
         with:
           name: rustdesk-windows-x64
@@ -37,41 +41,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Inject server and key
-        run: |
-          python3 - <<'EOF'
-          import os, re
-          server = os.environ["RENDEZVOUS_SERVER"]
-          pub_key = os.environ["RS_PUB_KEY"]
-          for root, _, files in os.walk("src"):
-              for fn in files:
-                  if not fn.endswith(".rs"):
-                      continue
-                  fp = os.path.join(root, fn)
-                  with open(fp, "r", encoding="utf-8") as f:
-                      txt = f.read()
-                  new_txt = re.sub(
-                      r'const RENDEZVOUS_SERVERS: &\[&str\] = &\[.*?\];',
-                      f'const RENDEZVOUS_SERVERS: &[&str] = &["{server}"];',
-                      txt,
-                      flags=re.S,
-                  )
-                  new_txt = re.sub(
-                      r'pub const RS_PUB_KEY: &str = ".*?";',
-                      f'pub const RS_PUB_KEY: &str = "{pub_key}";',
-                      new_txt,
-                      flags=re.S,
-                  )
-                  if new_txt != txt:
-                      with open(fp, "w", encoding="utf-8") as f:
-                          f.write(new_txt)
-          EOF
         env:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
           RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          python3 - <<'EOF'
+          import os, re, pathlib
+
+          server = os.environ.get("RENDEZVOUS_SERVER", "").strip()
+          pub_key = os.environ.get("RS_PUB_KEY", "").strip()
+          assert server, "RENDEZVOUS_SERVER is empty"
+          assert pub_key, "RS_PUB_KEY is empty"
+
+          p = pathlib.Path("src/common.rs")
+          assert p.exists(), "src/common.rs not found"
+          txt = p.read_text(encoding="utf-8")
+
+          new_txt = re.sub(
+              r'(?s)(RENDEZVOUS_SERVERS[^=]*=\s*&\[)[^\]]*(\]\s*;)',
+              rf'\g<1>"{server}"\g<2>',
+              txt,
+          )
+          new_txt = re.sub(
+              r'(?s)(RS_PUB_KEY[^=]*=\s*&?str\s*=\s*)"[^"]*"',
+              rf'\g<1>"{pub_key}"',
+              new_txt,
+          )
+          assert new_txt != txt, "No replacement made in src/common.rs; check constant definitions"
+          p.write_text(new_txt, encoding="utf-8")
+          EOF
       - name: Build macOS release binary and DMG
         run: |
-          cargo build --release
-          hdiutil create -volname "RustDesk-Custom" -srcfolder target/release -ov -format UDZO RustDesk-macOS.dmg
+          cargo build --release --bin rustdesk
+          mkdir -p /tmp/rustdesk-dmg
+          cp target/release/rustdesk /tmp/rustdesk-dmg/
+          hdiutil create -volname "RustDesk-Custom" -srcfolder /tmp/rustdesk-dmg -ov -format UDZO RustDesk-macOS.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: rustdesk-macos-dmg
