@@ -64,20 +64,14 @@ jobs:
             throw "Failed to replace constants. replacedServer=$replacedServer replacedKey=$replacedKey"
           }
 
-      - name: Install Windows dependencies via vcpkg
+      - name: Install Windows dependencies via vcpkg (manifest mode)
         shell: pwsh
         run: |
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
-          if (-not [string]::IsNullOrWhiteSpace($vcpkgRoot) -and (Test-Path "$vcpkgRoot\vcpkg.exe")) {
-            & "$vcpkgRoot\vcpkg.exe" install "libyuv:x64-windows-static"
-            $installedDir = "$vcpkgRoot\installed\x64-windows-static"
-            if (Test-Path "$installedDir\include") {
-              "LIBYUV_INCLUDE_DIR=$installedDir\include" | Out-File -FilePath $env:GITHUB_ENV -Append
-            }
-            if (Test-Path "$installedDir\lib") {
-              "LIBYUV_LIB_DIR=$installedDir\lib" | Out-File -FilePath $env:GITHUB_ENV -Append
-            }
+          if ([string]::IsNullOrWhiteSpace($vcpkgRoot) -or -not (Test-Path "$vcpkgRoot\vcpkg.exe")) {
+            throw "vcpkg.exe not found at $vcpkgRoot"
           }
+          & "$vcpkgRoot\vcpkg.exe" install --triplet x64-windows-static
 
       - name: Build Windows release binary
         shell: pwsh
@@ -119,12 +113,12 @@ jobs:
               updated = raw
 
               updated, n1 = re.subn(
-                  r'(?s)(RENDEZVOUS_SERVERS\s*(?::[^=]+)?\s*=\s*&\[)[^\]]*(\]\s*;)',
+                  r'(?s)(RENDEZVOUS_SERVERS\s*(?::[^=]+)?=\s*&\[)[^\]]*(\]\s*;)',
                   rf'\g<1>"{server}"\g<2>',
                   updated,
               )
               updated, n2 = re.subn(
-                  r'(?s)(RS_PUB_KEY\s*(?::[^=]+)?\s*=\s*)"[^"]*"',
+                  r'(?s)(RS_PUB_KEY\s*(?::[^=]+)?=\s*)"[^"]*"',
                   rf'\g<1>"{pub_key}"',
                   updated,
               )
@@ -144,10 +138,13 @@ jobs:
           )
           EOF
 
-      - name: Install macOS dependencies
+      - name: Install macOS dependencies via vcpkg
         run: |
-          brew install libyuv
-          echo "PKG_CONFIG_PATH=$(brew --prefix libyuv)/lib/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          brew install nasm cmake ninja pkg-config
+          git clone --depth 1 https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          "$HOME/vcpkg/vcpkg" install libyuv
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
 
       - name: Build macOS release binary and DMG
         run: |
