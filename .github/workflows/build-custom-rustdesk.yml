@@ -10,6 +10,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - name: Inject server and key
         shell: pwsh
         env:
@@ -21,38 +22,68 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($server) -or [string]::IsNullOrWhiteSpace($pubKey)) {
             throw "Missing RENDEZVOUS_SERVER or RS_PUB_KEY secret."
           }
+
           $files = Get-ChildItem -Filter "*.rs" -Recurse | Where-Object { $_.FullName -notmatch '\\target\\' }
           $replacedServer = $false
           $replacedKey = $false
+
           foreach ($f in $files) {
             $raw = Get-Content $f.FullName -Raw
             $updated = $raw
+
             if ($updated -match 'RENDEZVOUS_SERVERS\s*(?::[^=]+)?\s*=') {
-              $updated = [regex]::Replace($updated, '(?s)(RENDEZVOUS_SERVERS\s*(?::[^=]+)?\s*=\s*&\[)[^\]]*(\]\s*;)', "`${1}`"$server`"`${2}")
+              $updated = [regex]::Replace(
+                $updated,
+                '(?s)(RENDEZVOUS_SERVERS\s*(?::[^=]+)?\s*=\s*&\[)[^\]]*(\]\s*;)',
+                "`${1}`"$server`"`${2}"
+              )
               if ($updated -ne $raw) {
                 $replacedServer = $true
                 Write-Host "Updated RENDEZVOUS_SERVERS in $($f.FullName)"
               }
             }
+
             if ($updated -match 'RS_PUB_KEY\s*(?::[^=]+)?\s*=') {
-              $updated = [regex]::Replace($updated, '(?s)(RS_PUB_KEY\s*(?::[^=]+)?\s*=\s*)"[^"]*"', "`${1}`"$pubKey`"")
+              $updated = [regex]::Replace(
+                $updated,
+                '(?s)(RS_PUB_KEY\s*(?::[^=]+)?\s*=\s*)"[^"]*"',
+                "`${1}`"$pubKey`""
+              )
               if ($updated -ne $raw) {
                 $replacedKey = $true
                 Write-Host "Updated RS_PUB_KEY in $($f.FullName)"
               }
             }
+
             if ($updated -ne $raw) {
               Set-Content -Path $f.FullName -Value $updated -NoNewline
             }
           }
+
           if (-not $replacedServer -or -not $replacedKey) {
-            Select-String -Path "libs\**\*.rs","src\**\*.rs" -Pattern "pub const RENDEZVOUS_SERVERS|pub const RS_PUB_KEY|static .*RENDEZVOUS_SERVERS|static .*RS_PUB_KEY" | Select-Object -First 20
             throw "Failed to replace constants. replacedServer=$replacedServer replacedKey=$replacedKey"
           }
+
+      - name: Install Windows dependencies via vcpkg
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not [string]::IsNullOrWhiteSpace($vcpkgRoot) -and (Test-Path "$vcpkgRoot\vcpkg.exe")) {
+            & "$vcpkgRoot\vcpkg.exe" install "libyuv:x64-windows-static"
+            $installedDir = "$vcpkgRoot\installed\x64-windows-static"
+            if (Test-Path "$installedDir\include") {
+              "LIBYUV_INCLUDE_DIR=$installedDir\include" | Out-File -FilePath $env:GITHUB_ENV -Append
+            }
+            if (Test-Path "$installedDir\lib") {
+              "LIBYUV_LIB_DIR=$installedDir\lib" | Out-File -FilePath $env:GITHUB_ENV -Append
+            }
+          }
+
       - name: Build Windows release binary
         shell: pwsh
         run: |
           cargo build --release --bin rustdesk
+
       - uses: actions/upload-artifact@v4
         with:
           name: rustdesk-windows-x64
@@ -64,6 +95,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - name: Inject server and key
         env:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
@@ -85,6 +117,7 @@ jobs:
                   continue
               raw = fp.read_text(encoding="utf-8", errors="ignore")
               updated = raw
+
               updated, n1 = re.subn(
                   r'(?s)(RENDEZVOUS_SERVERS\s*(?::[^=]+)?\s*=\s*&\[)[^\]]*(\]\s*;)',
                   rf'\g<1>"{server}"\g<2>',
@@ -95,33 +128,34 @@ jobs:
                   rf'\g<1>"{pub_key}"',
                   updated,
               )
+
               if n1 > 0:
                   replaced_server = True
                   print(f"Updated RENDEZVOUS_SERVERS in {fp}")
               if n2 > 0:
                   replaced_key = True
                   print(f"Updated RS_PUB_KEY in {fp}")
+
               if updated != raw:
                   fp.write_text(updated, encoding="utf-8")
 
-          if not (replaced_server and replaced_key):
-              for fp in pathlib.Path(".").rglob("*.rs"):
-                  if "target" in fp.parts:
-                      continue
-                  txt = fp.read_text(encoding="utf-8", errors="ignore")
-                  for i, line in enumerate(txt.splitlines(), 1):
-                      if "RENDEZVOUS_SERVERS" in line or "RS_PUB_KEY" in line:
-                          print(f"{fp}:{i}: {line}")
-              raise AssertionError(
-                  f"Constant replacement failed: replaced_server={replaced_server}, replaced_key={replaced_key}"
-              )
+          assert replaced_server and replaced_key, (
+              f"Constant replacement failed: replaced_server={replaced_server}, replaced_key={replaced_key}"
+          )
           EOF
+
+      - name: Install macOS dependencies
+        run: |
+          brew install libyuv
+          echo "PKG_CONFIG_PATH=$(brew --prefix libyuv)/lib/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
       - name: Build macOS release binary and DMG
         run: |
           cargo build --release --bin rustdesk
           mkdir -p /tmp/rustdesk-dmg
           cp target/release/rustdesk /tmp/rustdesk-dmg/
           hdiutil create -volname "RustDesk-Custom" -srcfolder /tmp/rustdesk-dmg -ov -format UDZO RustDesk-macOS.dmg
+
       - uses: actions/upload-artifact@v4
         with:
           name: rustdesk-macos-dmg
