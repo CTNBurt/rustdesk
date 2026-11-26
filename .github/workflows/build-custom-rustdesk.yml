@@ -8,25 +8,43 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Inject server and key
         shell: pwsh
         env:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
           RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
         run: |
-          $server = $env:RENDEZVOUS_SERVER
-          $pubKey = $env:RS_PUB_KEY
+          $server = $env:RENDEZVOUS_SERVER.Trim()
+          $pubKey = $env:RS_PUB_KEY.Trim()
           if ([string]::IsNullOrWhiteSpace($server) -or [string]::IsNullOrWhiteSpace($pubKey)) {
             throw "Missing RENDEZVOUS_SERVER or RS_PUB_KEY secret."
           }
-          $commonPath = "src/common.rs"
-          if (-not (Test-Path $commonPath)) {
-            throw "src/common.rs not found."
+          $files = Get-ChildItem -Path src -Filter "*.rs" -Recurse
+          $replacedServer = $false
+          $replacedKey = $false
+          foreach ($f in $files) {
+            $lines = Get-Content $f.FullName
+            $changed = $false
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match 'RENDEZVOUS_SERVERS\s*[:=]') {
+                $lines[$i] = "pub const RENDEZVOUS_SERVERS: &[&str] = &[`"$server`"];"
+                $changed = $true
+                $replacedServer = $true
+              } elseif ($lines[$i] -match 'RS_PUB_KEY\s*[:=]') {
+                $lines[$i] = "pub const RS_PUB_KEY: &str = `"$pubKey`";"
+                $changed = $true
+                $replacedKey = $true
+              }
+            }
+            if ($changed) {
+              Set-Content -Path $f.FullName -Value $lines
+            }
           }
-          $txt = Get-Content $commonPath -Raw
-          $txt = [regex]::Replace($txt, '(?s)(RENDEZVOUS_SERVERS[^=]*=\s*&\[)[^\]]*(\]\s*;)', "`${1}`"$server`"`${2}")
-          $txt = [regex]::Replace($txt, '(?s)(RS_PUB_KEY[^=]*=\s*&?str\s*=\s*)"[^"]*"', "`${1}`"$pubKey`"")
-          Set-Content -Path $commonPath -Value $txt -NoNewline
+          if (-not $replacedServer -or -not $replacedKey) {
+            throw "Failed to replace constants. replacedServer=$replacedServer replacedKey=$replacedKey"
+          }
       - name: Build Windows release binary
         shell: pwsh
         run: |
@@ -40,35 +58,42 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Inject server and key
         env:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
           RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
         run: |
           python3 - <<'EOF'
-          import os, re, pathlib
+          import os, pathlib, re
 
           server = os.environ.get("RENDEZVOUS_SERVER", "").strip()
           pub_key = os.environ.get("RS_PUB_KEY", "").strip()
           assert server, "RENDEZVOUS_SERVER is empty"
           assert pub_key, "RS_PUB_KEY is empty"
 
-          p = pathlib.Path("src/common.rs")
-          assert p.exists(), "src/common.rs not found"
-          txt = p.read_text(encoding="utf-8")
+          replaced_server = False
+          replaced_key = False
 
-          new_txt = re.sub(
-              r'(?s)(RENDEZVOUS_SERVERS[^=]*=\s*&\[)[^\]]*(\]\s*;)',
-              rf'\g<1>"{server}"\g<2>',
-              txt,
+          for fp in pathlib.Path("src").rglob("*.rs"):
+              lines = fp.read_text(encoding="utf-8").splitlines()
+              changed = False
+              for idx, line in enumerate(lines):
+                  if re.search(r"\bRENDEZVOUS_SERVERS\b\s*[:=]", line):
+                      lines[idx] = f'pub const RENDEZVOUS_SERVERS: &[&str] = &["{server}"];'
+                      changed = True
+                      replaced_server = True
+                  elif re.search(r"\bRS_PUB_KEY\b\s*[:=]", line):
+                      lines[idx] = f'pub const RS_PUB_KEY: &str = "{pub_key}";'
+                      changed = True
+                      replaced_key = True
+              if changed:
+                  fp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          assert replaced_server and replaced_key, (
+              f"Constant replacement failed: replaced_server={replaced_server}, replaced_key={replaced_key}"
           )
-          new_txt = re.sub(
-              r'(?s)(RS_PUB_KEY[^=]*=\s*&?str\s*=\s*)"[^"]*"',
-              rf'\g<1>"{pub_key}"',
-              new_txt,
-          )
-          assert new_txt != txt, "No replacement made in src/common.rs; check constant definitions"
-          p.write_text(new_txt, encoding="utf-8")
           EOF
       - name: Build macOS release binary and DMG
         run: |
