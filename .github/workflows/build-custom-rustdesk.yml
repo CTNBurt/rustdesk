@@ -64,17 +64,22 @@ jobs:
             throw "Failed to replace constants. replacedServer=$replacedServer replacedKey=$replacedKey"
           }
 
-      - name: Install Windows dependencies via vcpkg (manifest mode)
+      - name: Install Windows dependencies via vcpkg
         shell: pwsh
         run: |
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
           if ([string]::IsNullOrWhiteSpace($vcpkgRoot) -or -not (Test-Path "$vcpkgRoot\vcpkg.exe")) {
             throw "vcpkg.exe not found at $vcpkgRoot"
           }
+          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
           & "$vcpkgRoot\vcpkg.exe" install --triplet x64-windows-static
 
       - name: Build Windows release binary
         shell: pwsh
+        env:
+          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+          VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
           cargo build --release --bin rustdesk
 
@@ -113,12 +118,12 @@ jobs:
               updated = raw
 
               updated, n1 = re.subn(
-                  r'(?s)(RENDEZVOUS_SERVERS\s*(?::[^=]+)?=\s*&\[)[^\]]*(\]\s*;)',
+                  r'(?s)(RENDEZVOUS_SERVERS\s*(?::[^=]+)?\s*=\s*&\[)[^\]]*(\]\s*;)',
                   rf'\g<1>"{server}"\g<2>',
                   updated,
               )
               updated, n2 = re.subn(
-                  r'(?s)(RS_PUB_KEY\s*(?::[^=]+)?=\s*)"[^"]*"',
+                  r'(?s)(RS_PUB_KEY\s*(?::[^=]+)?\s*=\s*)"[^"]*"',
                   rf'\g<1>"{pub_key}"',
                   updated,
               )
@@ -143,10 +148,12 @@ jobs:
           brew install nasm cmake ninja pkg-config
           git clone --depth 1 https://github.com/microsoft/vcpkg "$HOME/vcpkg"
           "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
-          "$HOME/vcpkg/vcpkg" install libyuv
+          "$HOME/vcpkg/vcpkg" install
           echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
 
       - name: Build macOS release binary and DMG
+        env:
+          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
         run: |
           cargo build --release --bin rustdesk
           mkdir -p /tmp/rustdesk-dmg
