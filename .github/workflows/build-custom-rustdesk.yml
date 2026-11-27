@@ -95,16 +95,54 @@ jobs:
             }
           }
 
-          $incDir = "$vcpkgRoot\installed\x64-windows-static\include"
-          $libDir = "$vcpkgRoot\installed\x64-windows-static\lib"
+          & "$vcpkgRoot\vcpkg.exe" install --triplet x64-windows-static
+
+          $incPaths = @("$vcpkgRoot\installed\x64-windows-static\include")
+          $libPaths = @("$vcpkgRoot\installed\x64-windows-static\lib")
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($vsPath) {
+              $msvcVer = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+              if ($msvcVer) {
+                $msvcInc = Join-Path $msvcVer.FullName "include"
+                $msvcLib = Join-Path $msvcVer.FullName "lib\x64"
+                if (Test-Path $msvcInc) { $incPaths += $msvcInc }
+                if (Test-Path $msvcLib) { $libPaths += $msvcLib }
+              }
+            }
+          }
+
+          $kitRoot = "C:\Program Files (x86)\Windows Kits\10"
+          if (Test-Path "$kitRoot\Include") {
+            $latestKit = Get-ChildItem "$kitRoot\Include" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+            if ($latestKit) {
+              foreach ($sub in @("ucrt", "um", "shared")) {
+                $p = Join-Path $latestKit.FullName $sub
+                if (Test-Path $p) { $incPaths += $p }
+              }
+            }
+          }
+          if (Test-Path "$kitRoot\Lib") {
+            $latestLibKit = Get-ChildItem "$kitRoot\Lib" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+            if ($latestLibKit) {
+              foreach ($sub in @("ucrt\x64", "um\x64")) {
+                $p = Join-Path $latestLibKit.FullName $sub
+                if (Test-Path $p) { $libPaths += $p }
+              }
+            }
+          }
+
+          $joinedInc = ($incPaths -join ";")
+          $joinedLib = ($libPaths -join ";")
+          $clangArgs = ($incPaths | ForEach-Object { "-isystem`"$_`"" }) -join " "
 
           "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "INCLUDE=$incDir;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "LIB=$libDir;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "BINDGEN_EXTRA_CLANG_ARGS=-I`"$incDir`"" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-          & "$vcpkgRoot\vcpkg.exe" install --triplet x64-windows-static
+          "INCLUDE=$joinedInc;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "LIB=$joinedLib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BINDGEN_EXTRA_CLANG_ARGS=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build Windows release binary
         shell: pwsh
@@ -180,7 +218,7 @@ jobs:
       - name: Install macOS dependencies via vcpkg
         run: |
           brew install nasm cmake ninja pkg-config
-          git clone --depth 1 https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+          git clone https://github.com/microsoft/vcpkg "$HOME/vcpkg"
           "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
           python3 - <<'EOF'
           import json, pathlib
