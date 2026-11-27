@@ -82,7 +82,7 @@ jobs:
               $manifest | Add-Member -MemberType NoteProperty -Name "dependencies" -Value @()
             }
             $deps = @($manifest.dependencies)
-            foreach ($pkg in @("opus", "libvpx")) {
+            foreach ($pkg in @("opus", "libvpx", "libyuv")) {
               $exists = $false
               foreach ($d in $deps) {
                 if (($d -is [string] -and $d -eq $pkg) -or ($d.name -eq $pkg)) {
@@ -100,72 +100,32 @@ jobs:
 
           & "$vcpkgRoot\vcpkg.exe" install --triplet x64-windows-static
 
-          $candidateInc = @(
+          $searchRoots = @("$PWD\vcpkg_installed", "$vcpkgRoot\installed") | Where-Object { Test-Path $_ }
+          $libFiles = Get-ChildItem -Path $searchRoots -Filter "*.lib" -Recurse -ErrorAction SilentlyContinue
+          Write-Host "=== Matching opus/vpx libs ==="
+          $libFiles | Where-Object { $_.Name -match "opus|vpx|yuv" } | ForEach-Object { Write-Host $_.FullName }
+
+          $libDirs = @($libFiles | ForEach-Object { $_.DirectoryName } | Select-Object -Unique)
+          $incDirs = @(
             "$PWD\vcpkg_installed\x64-windows-static\include",
             "$vcpkgRoot\installed\x64-windows-static\include"
           ) | Where-Object { Test-Path $_ }
 
-          $candidateLib = @(
-            "$PWD\vcpkg_installed\x64-windows-static\lib",
-            "$vcpkgRoot\installed\x64-windows-static\lib"
-          ) | Where-Object { Test-Path $_ }
-
-          $incPaths = @($candidateInc)
-          $libPaths = @($candidateLib)
-
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (Test-Path $vswhere) {
-            $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-            if ($vsPath) {
-              $msvcVer = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
-              if ($msvcVer) {
-                $msvcInc = Join-Path $msvcVer.FullName "include"
-                $msvcLib = Join-Path $msvcVer.FullName "lib\x64"
-                if (Test-Path $msvcInc) { $incPaths += $msvcInc }
-                if (Test-Path $msvcLib) { $libPaths += $msvcLib }
-              }
-            }
-          }
-
-          $kitRoot = "C:\Program Files (x86)\Windows Kits\10"
-          if (Test-Path "$kitRoot\Include") {
-            $latestKit = Get-ChildItem "$kitRoot\Include" -Directory | Sort-Object Name -Descending | Select-Object -First 1
-            if ($latestKit) {
-              foreach ($sub in @("ucrt", "um", "shared")) {
-                $p = Join-Path $latestKit.FullName $sub
-                if (Test-Path $p) { $incPaths += $p }
-              }
-            }
-          }
-          if (Test-Path "$kitRoot\Lib") {
-            $latestLibKit = Get-ChildItem "$kitRoot\Lib" -Directory | Sort-Object Name -Descending | Select-Object -First 1
-            if ($latestLibKit) {
-              foreach ($sub in @("ucrt\x64", "um\x64")) {
-                $p = Join-Path $latestLibKit.FullName $sub
-                if (Test-Path $p) { $libPaths += $p }
-              }
-            }
-          }
-
-          $joinedInc = ($incPaths -join ";")
-          $joinedLib = ($libPaths -join ";")
-          $clangArgs = ($incPaths | ForEach-Object { "-I$_" }) -join " "
+          $clangArgs = ($incDirs | ForEach-Object { "-I$_" }) -join " "
+          $nativeFlags = ($libDirs | ForEach-Object { "-L", "native=$_" })
+          $rustFlagsList = @("-C", "target-feature=+crt-static") + $nativeFlags
+          $rustFlagsToml = ($rustFlagsList | ForEach-Object { "`"$($_.Replace('\', '\\'))`"" }) -join ", "
 
           New-Item -ItemType Directory -Force -Path ".cargo" | Out-Null
           @"
           [env]
           VCPKG_ROOT = "$($vcpkgRoot.Replace('\', '\\'))"
           VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
-          INCLUDE = "$($joinedInc.Replace('\', '\\'))"
-          LIB = "$($joinedLib.Replace('\', '\\'))"
           BINDGEN_EXTRA_CLANG_ARGS = "$($clangArgs.Replace('\', '\\'))"
-          "@ | Set-Content ".cargo\config.toml" -Encoding utf8
 
-          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "INCLUDE=$joinedInc" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "LIB=$joinedLib" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "BINDGEN_EXTRA_CLANG_ARGS=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Append
+          [build]
+          rustflags = [$rustFlagsToml]
+          "@ | Set-Content ".cargo\config.toml" -Encoding utf8
 
       - name: Build Windows release binary
         shell: pwsh
@@ -243,7 +203,7 @@ jobs:
           if p.exists():
               data = json.loads(p.read_text(encoding="utf-8"))
               deps = data.setdefault("dependencies", [])
-              for pkg in ["opus", "libvpx"]:
+              for pkg in ["opus", "libvpx", "libyuv"]:
                   if not any((d == pkg) or (isinstance(d, dict) and d.get("name") == pkg) for d in deps):
                       deps.append(pkg)
                       print(f"Added '{pkg}' to vcpkg.json")
@@ -251,16 +211,14 @@ jobs:
           EOF
           "$HOME/vcpkg/vcpkg" install --triplet arm64-osx
 
+          echo "=== Matching opus/vpx/yuv libs ==="
+          find "$PWD/vcpkg_installed" "$HOME/vcpkg/installed" -name "*.a" 2>/dev/null | grep -E "opus|vpx|yuv" || true
+
+          LIB_DIRS=$(find "$PWD/vcpkg_installed" "$HOME/vcpkg/installed" -name "*.a" 2>/dev/null | xargs -n1 dirname | sort -u)
           INC_DIRS=""
-          LIB_DIRS=""
           for d in "$PWD/vcpkg_installed/arm64-osx/include" "$HOME/vcpkg/installed/arm64-osx/include"; do
             if [ -d "$d" ]; then
               INC_DIRS="${INC_DIRS:+$INC_DIRS:}$d"
-            fi
-          done
-          for d in "$PWD/vcpkg_installed/arm64-osx/lib" "$HOME/vcpkg/installed/arm64-osx/lib"; do
-            if [ -d "$d" ]; then
-              LIB_DIRS="${LIB_DIRS:+$LIB_DIRS:}$d"
             fi
           done
 
@@ -269,25 +227,21 @@ jobs:
             CLANG_ARGS="$CLANG_ARGS -I$d"
           done
 
+          RUSTFLAGS_TOML=""
+          for d in $LIB_DIRS; do
+            RUSTFLAGS_TOML="${RUSTFLAGS_TOML:+$RUSTFLAGS_TOML, }\"-L\", \"native=$d\""
+          done
+
           mkdir -p .cargo
           cat > .cargo/config.toml <<EOF
           [env]
           VCPKG_ROOT = "$HOME/vcpkg"
           VCPKG_DEFAULT_TRIPLET = "arm64-osx"
-          CPATH = "$INC_DIRS"
-          CFLAGS = "$CLANG_ARGS"
-          CXXFLAGS = "$CLANG_ARGS"
           BINDGEN_EXTRA_CLANG_ARGS = "$CLANG_ARGS"
-          LIBRARY_PATH = "$LIB_DIRS"
-          EOF
 
-          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
-          echo "VCPKG_DEFAULT_TRIPLET=arm64-osx" >> "$GITHUB_ENV"
-          echo "CPATH=$INC_DIRS" >> "$GITHUB_ENV"
-          echo "CFLAGS=$CLANG_ARGS" >> "$GITHUB_ENV"
-          echo "CXXFLAGS=$CLANG_ARGS" >> "$GITHUB_ENV"
-          echo "BINDGEN_EXTRA_CLANG_ARGS=$CLANG_ARGS" >> "$GITHUB_ENV"
-          echo "LIBRARY_PATH=$LIB_DIRS" >> "$GITHUB_ENV"
+          [build]
+          rustflags = [$RUSTFLAGS_TOML]
+          EOF
 
       - name: Build macOS release binary and DMG
         run: |
