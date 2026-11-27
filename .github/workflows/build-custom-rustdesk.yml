@@ -136,13 +136,14 @@ jobs:
 
           $joinedInc = ($incPaths -join ";")
           $joinedLib = ($libPaths -join ";")
-          $clangArgs = ($incPaths | ForEach-Object { "-isystem`"$_`"" }) -join " "
+          $clangArgs = ($incPaths | ForEach-Object { "-I`"$_`"" }) -join " "
 
           "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
           "INCLUDE=$joinedInc;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Append
           "LIB=$joinedLib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append
           "BINDGEN_EXTRA_CLANG_ARGS=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BINDGEN_EXTRA_CLANG_ARGS_x86_64-pc-windows-msvc=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build Windows release binary
         shell: pwsh
@@ -152,6 +153,7 @@ jobs:
           INCLUDE: ${{ env.INCLUDE }}
           LIB: ${{ env.LIB }}
           BINDGEN_EXTRA_CLANG_ARGS: ${{ env.BINDGEN_EXTRA_CLANG_ARGS }}
+          BINDGEN_EXTRA_CLANG_ARGS_x86_64-pc-windows-msvc: ${{ env.BINDGEN_EXTRA_CLANG_ARGS_x86_64-pc-windows-msvc }}
         run: |
           cargo build --release --bin rustdesk
 
@@ -232,11 +234,20 @@ jobs:
                   print("Added 'opus' to vcpkg.json")
           EOF
           "$HOME/vcpkg/vcpkg" install
+          VCPKG_INC="$HOME/vcpkg/installed/arm64-osx/include"
+          VCPKG_LIB="$HOME/vcpkg/installed/arm64-osx/lib"
+          ls -la "$VCPKG_INC" || true
           echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$VCPKG_INC" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64-apple-darwin=-I$VCPKG_INC" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$VCPKG_LIB:$LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Build macOS release binary and DMG
         env:
           VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+          BINDGEN_EXTRA_CLANG_ARGS: ${{ env.BINDGEN_EXTRA_CLANG_ARGS }}
+          BINDGEN_EXTRA_CLANG_ARGS_aarch64-apple-darwin: ${{ env.BINDGEN_EXTRA_CLANG_ARGS_aarch64-apple-darwin }}
+          LIBRARY_PATH: ${{ env.LIBRARY_PATH }}
         run: |
           cargo build --release --bin rustdesk
           mkdir -p /tmp/rustdesk-dmg
