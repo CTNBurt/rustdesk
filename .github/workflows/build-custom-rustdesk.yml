@@ -65,7 +65,7 @@ jobs:
             throw "Failed to replace constants. replacedServer=$replacedServer replacedKey=$replacedKey"
           }
 
-      - name: Ensure opus and libvpx are in vcpkg.json and install dependencies
+      - name: Install Windows dependencies and configure paths
         shell: pwsh
         run: |
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
@@ -101,15 +101,23 @@ jobs:
           & "$vcpkgRoot\vcpkg.exe" install --triplet x64-windows-static
 
           $searchRoots = @("$PWD\vcpkg_installed", "$vcpkgRoot\installed") | Where-Object { Test-Path $_ }
-          $libFiles = Get-ChildItem -Path $searchRoots -Filter "*.lib" -Recurse -ErrorAction SilentlyContinue
-          Write-Host "=== Matching opus/vpx libs ==="
-          $libFiles | Where-Object { $_.Name -match "opus|vpx|yuv" } | ForEach-Object { Write-Host $_.FullName }
+          $vp8 = Get-ChildItem -Path $searchRoots -Filter "vp8.h" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $vp8) {
+            throw "vp8.h not found anywhere under workspace or $vcpkgRoot"
+          }
+          $vpxIncRoot = Split-Path (Split-Path $vp8.FullName -Parent) -Parent
+          Write-Host "Found vpx include root: $vpxIncRoot"
 
-          $libDirs = @($libFiles | ForEach-Object { $_.DirectoryName } | Select-Object -Unique)
           $incDirs = @(
+            $vpxIncRoot,
             "$PWD\vcpkg_installed\x64-windows-static\include",
             "$vcpkgRoot\installed\x64-windows-static\include"
-          ) | Where-Object { Test-Path $_ }
+          ) | Where-Object { Test-Path $_ } | Select-Object -Unique
+
+          $libFiles = Get-ChildItem -Path $searchRoots -Filter "*.lib" -Recurse -ErrorAction SilentlyContinue
+          Write-Host "=== Matching opus/vpx/yuv libs ==="
+          $libFiles | Where-Object { $_.Name -match "opus|vpx|yuv" } | ForEach-Object { Write-Host $_.FullName }
+          $libDirs = @($libFiles | ForEach-Object { $_.DirectoryName } | Select-Object -Unique)
 
           $clangArgs = ($incDirs | ForEach-Object { "-I$_" }) -join " "
           $nativeFlags = ($libDirs | ForEach-Object { "-L", "native=$_" })
@@ -122,10 +130,16 @@ jobs:
           VCPKG_ROOT = "$($vcpkgRoot.Replace('\', '\\'))"
           VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
           BINDGEN_EXTRA_CLANG_ARGS = "$($clangArgs.Replace('\', '\\'))"
+          BINDGEN_EXTRA_CLANG_ARGS_x86_64-pc-windows-msvc = "$($clangArgs.Replace('\', '\\'))"
 
           [build]
           rustflags = [$rustFlagsToml]
           "@ | Set-Content ".cargo\config.toml" -Encoding utf8
+
+          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BINDGEN_EXTRA_CLANG_ARGS=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BINDGEN_EXTRA_CLANG_ARGS_x86_64-pc-windows-msvc=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build Windows release binary
         shell: pwsh
