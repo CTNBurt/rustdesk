@@ -17,16 +17,286 @@ jobs:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
           RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
         run: |
-          $server =$env:RENDEZVOUS_SERVER.Trim()
-          $pubKey =$env:RS_PUB_KEY.Trim()
+          $server = $env:RENDEZVOUS_SERVER.Trim()
+          $pubKey = $env:RS_PUB_KEY.Trim()
           if ([string]::IsNullOrWhiteSpace($server) -or [string]::IsNullOrWhiteSpace($pubKey)) {
             throw "Missing RENDEZVOUS_SERVER or RS_PUB_KEY secret."
           }
 
           $q = '"'
-          $files = Get-ChildItem -Filter "*.rs" -Recurse \vert{} Where-Object { $_.FullName -notmatch '\\target\\' }
-          $replacedServer =$false
-          $replacedKey =$false
+          $files = Get-ChildItem -Filter "*.rs" -Recurse | Where-Object { $_.FullName -notmatch '\\target\\' }
+          $replacedServer = $false
+          $replacedKey = $false
 
-          foreach ($f in$files) {
-            $raw = Get-Content$f.FullName -Raw
+          foreach ($f in $files) {
+            $raw = Get-Content $f.FullName -Raw
+            $updated = $raw
+
+            if ($updated -match 'RENDEZVOUS_SERVERS\s*(?::[^=]+)?\s*=') {
+              $updated = [regex]::Replace(
+                $updated,
+                '(?s)(RENDEZVOUS_SERVERS\s*(?::[^=]+)?\s*=\s*&\[)[^\]]*(\]\s*;)',
+                "`${1}${q}${server}${q}`${2}"
+              )
+              if ($updated -ne $raw) {
+                $replacedServer = $true
+                Write-Host "Updated RENDEZVOUS_SERVERS in $($f.FullName)"
+              }
+            }
+
+            if ($updated -match 'RS_PUB_KEY\s*(?::[^=]+)?\s*=') {
+              $updated = [regex]::Replace(
+                $updated,
+                '(?s)(RS_PUB_KEY\s*(?::[^=]+)?\s*=\s*)"[^"]*"',
+                "`${1}${q}${pubKey}${q}"
+              )
+              if ($updated -ne $raw) {
+                $replacedKey = $true
+                Write-Host "Updated RS_PUB_KEY in $($f.FullName)"
+              }
+            }
+
+            if ($updated -ne $raw) {
+              Set-Content -Path $f.FullName -Value $updated -NoNewline
+            }
+          }
+
+          if (-not $replacedServer -or -not $replacedKey) {
+            throw "Failed to replace constants. replacedServer=$replacedServer replacedKey=$replacedKey"
+          }
+
+      - name: Ensure opus and libvpx are in vcpkg.json and install dependencies
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if ([string]::IsNullOrWhiteSpace($vcpkgRoot) -or -not (Test-Path "$vcpkgRoot\vcpkg.exe")) {
+            $vcpkgRoot = "C:\vcpkg"
+          }
+          if (-not (Test-Path "$vcpkgRoot\vcpkg.exe")) {
+            throw "vcpkg.exe not found at $vcpkgRoot"
+          }
+
+          if (Test-Path "vcpkg.json") {
+            $manifest = Get-Content "vcpkg.json" -Raw | ConvertFrom-Json
+            if ($null -eq $manifest.dependencies) {
+              $manifest | Add-Member -MemberType NoteProperty -Name "dependencies" -Value @()
+            }
+            $deps = @($manifest.dependencies)
+            foreach ($pkg in @("opus", "libvpx")) {
+              $exists = $false
+              foreach ($d in $deps) {
+                if (($d -is [string] -and $d -eq $pkg) -or ($d.name -eq $pkg)) {
+                  $exists = $true
+                }
+              }
+              if (-not $exists) {
+                $deps += $pkg
+                Write-Host "Added '$pkg' to vcpkg.json"
+              }
+            }
+            $manifest.dependencies = $deps
+            $manifest | ConvertTo-Json -Depth 10 | Set-Content "vcpkg.json" -Encoding utf8
+          }
+
+          & "$vcpkgRoot\vcpkg.exe" install --triplet x64-windows-static
+
+          $candidateInc = @(
+            "$PWD\vcpkg_installed\x64-windows-static\include",
+            "$vcpkgRoot\installed\x64-windows-static\include"
+          ) | Where-Object { Test-Path $_ }
+
+          $candidateLib = @(
+            "$PWD\vcpkg_installed\x64-windows-static\lib",
+            "$vcpkgRoot\installed\x64-windows-static\lib"
+          ) | Where-Object { Test-Path $_ }
+
+          $incPaths = @($candidateInc)
+          $libPaths = @($candidateLib)
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($vsPath) {
+              $msvcVer = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+              if ($msvcVer) {
+                $msvcInc = Join-Path $msvcVer.FullName "include"
+                $msvcLib = Join-Path $msvcVer.FullName "lib\x64"
+                if (Test-Path $msvcInc) { $incPaths += $msvcInc }
+                if (Test-Path $msvcLib) { $libPaths += $msvcLib }
+              }
+            }
+          }
+
+          $kitRoot = "C:\Program Files (x86)\Windows Kits\10"
+          if (Test-Path "$kitRoot\Include") {
+            $latestKit = Get-ChildItem "$kitRoot\Include" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+            if ($latestKit) {
+              foreach ($sub in @("ucrt", "um", "shared")) {
+                $p = Join-Path $latestKit.FullName $sub
+                if (Test-Path $p) { $incPaths += $p }
+              }
+            }
+          }
+          if (Test-Path "$kitRoot\Lib") {
+            $latestLibKit = Get-ChildItem "$kitRoot\Lib" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+            if ($latestLibKit) {
+              foreach ($sub in @("ucrt\x64", "um\x64")) {
+                $p = Join-Path $latestLibKit.FullName $sub
+                if (Test-Path $p) { $libPaths += $p }
+              }
+            }
+          }
+
+          $joinedInc = ($incPaths -join ";")
+          $joinedLib = ($libPaths -join ";")
+          $clangArgs = ($incPaths | ForEach-Object { "-I$_" }) -join " "
+
+          New-Item -ItemType Directory -Force -Path ".cargo" | Out-Null
+          @"
+          [env]
+          VCPKG_ROOT = "$($vcpkgRoot.Replace('\', '\\'))"
+          VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
+          INCLUDE = "$($joinedInc.Replace('\', '\\'))"
+          LIB = "$($joinedLib.Replace('\', '\\'))"
+          BINDGEN_EXTRA_CLANG_ARGS = "$($clangArgs.Replace('\', '\\'))"
+          "@ | Set-Content ".cargo\config.toml" -Encoding utf8
+
+          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "INCLUDE=$joinedInc" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "LIB=$joinedLib" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BINDGEN_EXTRA_CLANG_ARGS=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build Windows release binary
+        shell: pwsh
+        run: |
+          cargo build --release --bin rustdesk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-windows-x64
+          path: target/release/rustdesk.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Inject server and key
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          python3 - <<'EOF'
+          import os, pathlib, re
+
+          server = os.environ.get("RENDEZVOUS_SERVER", "").strip()
+          pub_key = os.environ.get("RS_PUB_KEY", "").strip()
+          assert server, "RENDEZVOUS_SERVER is empty"
+          assert pub_key, "RS_PUB_KEY is empty"
+
+          replaced_server = False
+          replaced_key = False
+
+          for fp in pathlib.Path(".").rglob("*.rs"):
+              if "target" in fp.parts:
+                  continue
+              raw = fp.read_text(encoding="utf-8", errors="ignore")
+              updated = raw
+
+              updated, n1 = re.subn(
+                  r'(?s)(RENDEZVOUS_SERVERS\s*(?::[^=]+)?=\s*&\[)[^\]]*(\]\s*;)',
+                  rf'\g<1>"{server}"\g<2>',
+                  updated,
+              )
+              updated, n2 = re.subn(
+                  r'(?s)(RS_PUB_KEY\s*(?::[^=]+)?=\s*)"[^"]*"',
+                  rf'\g<1>"{pub_key}"',
+                  updated,
+              )
+
+              if n1 > 0:
+                  replaced_server = True
+                  print(f"Updated RENDEZVOUS_SERVERS in {fp}")
+              if n2 > 0:
+                  replaced_key = True
+                  print(f"Updated RS_PUB_KEY in {fp}")
+
+              if updated != raw:
+                  fp.write_text(updated, encoding="utf-8")
+
+          assert replaced_server and replaced_key, (
+              f"Constant replacement failed: replaced_server={replaced_server}, replaced_key={replaced_key}"
+          )
+          EOF
+
+      - name: Install macOS dependencies via vcpkg
+        run: |
+          brew install nasm cmake ninja pkg-config
+          git clone https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          python3 - <<'EOF'
+          import json, pathlib
+          p = pathlib.Path("vcpkg.json")
+          if p.exists():
+              data = json.loads(p.read_text(encoding="utf-8"))
+              deps = data.setdefault("dependencies", [])
+              for pkg in ["opus", "libvpx"]:
+                  if not any((d == pkg) or (isinstance(d, dict) and d.get("name") == pkg) for d in deps):
+                      deps.append(pkg)
+                      print(f"Added '{pkg}' to vcpkg.json")
+              p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+          EOF
+          "$HOME/vcpkg/vcpkg" install --triplet arm64-osx
+
+          INC_DIRS=""
+          LIB_DIRS=""
+          for d in "$PWD/vcpkg_installed/arm64-osx/include" "$HOME/vcpkg/installed/arm64-osx/include"; do
+            if [ -d "$d" ]; then
+              INC_DIRS="${INC_DIRS:+$INC_DIRS:}$d"
+            fi
+          done
+          for d in "$PWD/vcpkg_installed/arm64-osx/lib" "$HOME/vcpkg/installed/arm64-osx/lib"; do
+            if [ -d "$d" ]; then
+              LIB_DIRS="${LIB_DIRS:+$LIB_DIRS:}$d"
+            fi
+          done
+
+          CLANG_ARGS=""
+          for d in $(echo "$INC_DIRS" | tr ':' ' '); do
+            CLANG_ARGS="$CLANG_ARGS -I$d"
+          done
+
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<EOF
+          [env]
+          VCPKG_ROOT = "$HOME/vcpkg"
+          VCPKG_DEFAULT_TRIPLET = "arm64-osx"
+          CPATH = "$INC_DIRS"
+          CFLAGS = "$CLANG_ARGS"
+          CXXFLAGS = "$CLANG_ARGS"
+          BINDGEN_EXTRA_CLANG_ARGS = "$CLANG_ARGS"
+          LIBRARY_PATH = "$LIB_DIRS"
+          EOF
+
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+          echo "VCPKG_DEFAULT_TRIPLET=arm64-osx" >> "$GITHUB_ENV"
+          echo "CPATH=$INC_DIRS" >> "$GITHUB_ENV"
+          echo "CFLAGS=$CLANG_ARGS" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=$CLANG_ARGS" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=$CLANG_ARGS" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$LIB_DIRS" >> "$GITHUB_ENV"
+
+      - name: Build macOS release binary and DMG
+        run: |
+          cargo build --release --bin rustdesk
+          mkdir -p /tmp/rustdesk-dmg
+          cp target/release/rustdesk /tmp/rustdesk-dmg/
+          hdiutil create -volname "RustDesk-Custom" -srcfolder /tmp/rustdesk-dmg -ov -format UDZO RustDesk-macOS.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-macos-dmg
+          path: RustDesk-macOS.dmg
