@@ -233,11 +233,15 @@ jobs:
                   p.write_text(json.dumps(data, indent=2), encoding="utf-8")
                   print("Added 'opus' to vcpkg.json")
           EOF
-          "$HOME/vcpkg/vcpkg" install
+          "$HOME/vcpkg/vcpkg" install --triplet arm64-osx
           VCPKG_INC="$HOME/vcpkg/installed/arm64-osx/include"
           VCPKG_LIB="$HOME/vcpkg/installed/arm64-osx/lib"
-          ls -la "$VCPKG_INC" || true
+          ls -la "$VCPKG_INC/opus" || true
           echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+          echo "VCPKG_DEFAULT_TRIPLET=arm64-osx" >> "$GITHUB_ENV"
+          echo "CPATH=$VCPKG_INC:$CPATH" >> "$GITHUB_ENV"
+          echo "CFLAGS=-I$VCPKG_INC $CFLAGS" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=-I$VCPKG_INC $CXXFLAGS" >> "$GITHUB_ENV"
           echo "BINDGEN_EXTRA_CLANG_ARGS=-I$VCPKG_INC" >> "$GITHUB_ENV"
           echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64-apple-darwin=-I$VCPKG_INC" >> "$GITHUB_ENV"
           echo "LIBRARY_PATH=$VCPKG_LIB:$LIBRARY_PATH" >> "$GITHUB_ENV"
@@ -245,6 +249,10 @@ jobs:
       - name: Build macOS release binary and DMG
         env:
           VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+          VCPKG_DEFAULT_TRIPLET: arm64-osx
+          CPATH: ${{ env.CPATH }}
+          CFLAGS: ${{ env.CFLAGS }}
+          CXXFLAGS: ${{ env.CXXFLAGS }}
           BINDGEN_EXTRA_CLANG_ARGS: ${{ env.BINDGEN_EXTRA_CLANG_ARGS }}
           BINDGEN_EXTRA_CLANG_ARGS_aarch64-apple-darwin: ${{ env.BINDGEN_EXTRA_CLANG_ARGS_aarch64-apple-darwin }}
           LIBRARY_PATH: ${{ env.LIBRARY_PATH }}
